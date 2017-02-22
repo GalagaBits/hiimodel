@@ -33,6 +33,10 @@ unitfactor={'mJy':1e-26,'Jy':1e-23,'cgs':1.0}
 freqfactor={'GHz':1e9,'Hz':1.0}
 muh = 2.8
 
+default_te = 8500*u.K
+default_freq = 1*u.GHz
+# using the value from http://www.cv.nrao.edu/~sransom/web/Ch4.html
+alpha_b = 3e-13*u.cm**3*u.s**-1
 
 def tnu(Te, nu, EM):
     """
@@ -243,22 +247,22 @@ class HIIregion(object):
     # nu = array([1.4,5,8.33]); flux=array([4.7,9.2,9.1]); err=array([.52,.24,.07])
     # em,nutau,normfac,chi2 = UCHIIfitter.emtau(nu,flux,err)
 
-def dens(Qlyc=1e45*u.s**-1, R=0.1*u.pc, alpha_b=2e-13*u.cm**3*u.s**-1):
+def dens(Qlyc=1e45*u.s**-1, R=0.1*u.pc, alpha_b=alpha_b):
     return (((3 * Qlyc)/(4 * np.pi * R**3 * alpha_b))**0.5).to(u.cm**-3)
 
 def EM(Qlyc=1e45*u.s**-1, R=0.1*u.pc, alpha_b=2e-13*u.cm**3*u.s**-1):
     return (R * (((3 * Qlyc)/(4 * np.pi * R**3 *
                               alpha_b))**0.5)**2).to(u.cm**-6*u.pc)
 
-def tau(nu, EM, Te=7000*u.K):
+def tau(nu, EM, Te=default_te):
     return (3.28e-7 * (Te/(1e4*u.K))**-1.35 * (nu/u.GHz)**-2.1 *
             (EM/(u.cm**-6*u.pc)))
 
-def Tb(Te=7000*u.K, nu=95*u.GHz, EM=EM()):
+def Tb(Te=default_te, nu=95*u.GHz, EM=EM()):
     return Te * (1-np.exp(-tau(nu=nu, EM=EM, Te=Te)))
     #return (8.235e-2 * (Te/(u.K))**-0.35 * (nu/u.GHz)**-2.1 * (EM/u.cm**-6/u.pc)*u.K).to(u.K)
 
-def Tb_beamdiluted(Te=7000*u.K, nu=95*u.GHz, R=0.1*u.pc, Qlyc=1e45*u.s**-1,
+def Tb_beamdiluted(Te=default_te, nu=95*u.GHz, R=0.1*u.pc, Qlyc=1e45*u.s**-1,
                    beam=4000*u.au):
     tb = Tb(Te=Te, nu=nu, EM=EM(R=R, Qlyc=Qlyc))
     if beam < R:
@@ -266,17 +270,17 @@ def Tb_beamdiluted(Te=7000*u.K, nu=95*u.GHz, R=0.1*u.pc, Qlyc=1e45*u.s**-1,
     else:
         return (tb * (R/beam)**2).to(u.K)
 
-def Snu(Te=7000*u.K, nu=95*u.GHz, R=0.1*u.pc, Qlyc=1e45*u.s**-1, beam=4000*u.au,
-        angular_beam=0.5*u.arcsec, cfreq=90*u.GHz):
+def Snu(Te=default_te, nu=95*u.GHz, R=0.1*u.pc, Qlyc=1e45*u.s**-1, beam=4000*u.au,
+        angular_beam=0.5*u.arcsec):
     tb = Tb(Te=Te, nu=nu, EM=EM(R=R, Qlyc=Qlyc))
     if beam < R:
         return tb.to(u.mJy,
                      u.brightness_temperature(radio_beam.Beam(angular_beam),
-                                              cfreq))
+                                              nu))
     else:
         return (tb * (R/beam)**2).to(u.mJy,
                                      u.brightness_temperature(radio_beam.Beam(angular_beam),
-                                                              cfreq))
+                                                              nu))
 
 def snu_dust(density=1e4*u.cm**-3, Td=40*u.K, radius=4000*u.au,
              distance=8.4*u.kpc, cfreq=95*u.GHz):
@@ -288,5 +292,9 @@ def snu_dust(density=1e4*u.cm**-3, Td=40*u.K, radius=4000*u.au,
                           distance=distance)
     return flux
     
+def qlyc_of_tb(TB, Te=default_te, nu=default_freq, radius=1*u.pc):
+    return (-4/3. * np.pi * radius**2 * alpha_b * (3.28e-7)**-1 *
+            (Te/(1e4*u.K))**1.35 * (nu/u.GHz)**2.1 * np.log(1-TB/Te) * u.cm**-6 *
+            u.pc).to(u.s**-1)
 
 __all__ = [tnu,Inu,unitfactor,freqfactor,inufit,emtau,mpfitfun,HIIregion]
