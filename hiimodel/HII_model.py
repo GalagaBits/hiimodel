@@ -8,7 +8,6 @@ Fit a free-free spectrum to an SED.
 .. moduleauthor:: Adam Ginsburg <adam.g.ginsburg@gmail.com>
 
 """
-import pylab as pl
 import numpy as np
 try:
     from scipy import optimize
@@ -19,6 +18,19 @@ from astropy import units as u
 from astropy import constants
 import radio_beam
 from dust_emissivity import dust
+
+def val_with_unit(var, unit):
+    if hasattr(var, 'unit'):
+        return var.to(unit).value
+    else:
+        return var
+
+def with_unit(var, unit):
+    if hasattr(var, 'unit'):
+        return var.to(unit)
+    else:
+        return var*unit
+
 
 #kb = 1.38e-16
 #c=3e10
@@ -37,6 +49,8 @@ default_te = 8500*u.K
 default_freq = 1*u.GHz
 # using the value from http://www.cv.nrao.edu/~sransom/web/Ch4.html
 alpha_b = 3e-13*u.cm**3*u.s**-1
+# emission measure unit
+emu = u.cm**-6*u.pc
 
 def tnu(Te, nu, EM):
     """
@@ -53,12 +67,18 @@ def tnu(Te, nu, EM):
     Calculates optical depth as a function of temperature, frequency, and
     emission measure from Rohlfs and Wilson 2000's eqns 9.33 and 9.34.
 
+    (edit: later edition, this is equations 10.35 and 10.36)
+
     """
+    Te = with_unit(Te, u.K)
+    nu = with_unit(nu, u.GHz)
+    EM = with_unit(EM, emu)
+
 #    nu0 = .3045 * Te**-.643 * EM**.476
-    nu0 = Te**1.5 / 1000
-    answer_highnu = (nu > nu0) * 3.014e-2 * Te**-1.5 * nu**-2 * EM
-    gff_lownu = (np.log(4.955e-2 * nu**-1) + 1.5 * np.log(Te))  # <gff> Gaunt factor for free-free
-    answer_lownu = (nu < nu0) * 3.014e-2 * Te**-1.5 * nu**-2 * EM * gff_lownu
+    nu0 = ((Te/u.K)**1.5 / 1000)*u.GHz
+    answer_highnu = (nu > nu0) * 3.014e-2 * (Te/u.K)**-1.5 * (nu/u.GHz)**-2 * (EM/emu)
+    gff_lownu = (np.log(4.955e-2 * (nu/u.GHz)**-1) + 1.5 * np.log(Te/u.K))  # <gff> Gaunt factor for free-free
+    answer_lownu = (nu < nu0) * 3.014e-2 * (Te/u.K)**-1.5 * (nu/u.GHz)**-2 * (EM/emu) * gff_lownu
     tau = answer_lownu+answer_highnu
     ## altenhoff version
     #tau = 8.235e-2 * Te**-1.35 * nu**-2.1 * EM
@@ -72,7 +92,16 @@ def Inu(nu, tau, Te, I0=0):
     nu - frequency in Hz
     tau - optical depth
     Te - excitation temperature (K)
+
+    Parameters
+    ----------
+    I0 : float
+        Scale factor.  If zero, will be determined.  If not, will still be
+        determined.
     """
+    nu = with_unit(nu, u.GHz)
+    Te = with_unit(Te, u.K)
+
     if I0==0 and isinstance(nu,np.ndarray):
         whtau1 = np.argmin(np.abs(tau-1))
         nutau1 = nu[whtau1]
@@ -86,7 +115,7 @@ def Inu(nu, tau, Te, I0=0):
     thick = 2 * constants.k_B * Te * (nu * (tau > 1))**2 / constants.c**2
     return thin+thick
 
-def inufit(nu, em, normfac, Te=8500, unit='mJy', frequnit='GHz'):
+def inufit(nu, em, normfac, Te=default_te, unit='mJy', frequnit='GHz'):
     """
     Computes the expected intensity as a function of frequency
     for a given emission measure and normalization factor
@@ -97,11 +126,15 @@ def inufit(nu, em, normfac, Te=8500, unit='mJy', frequnit='GHz'):
 
     Units: mJy
     """
-    _nu = nu*freqfactor[frequnit]
-    I0 = 2 * constants.k_B * Te * _nu[0]**2 / constants.c**2
-    model_intensity = Inu(_nu,tnu(Te,_nu/1e9,em),Te,I0=I0)  # tnu takes GHz
+
+    nu = with_unit(nu, u.GHz)
+    em = with_unit(em, emu)
+    Te = with_unit(Te, u.K)
+
+    I0 = 2 * constants.k_B * Te * nu[0]**2 / constants.c**2
+    model_intensity = Inu(nu, tnu(Te, nu, em),Te,I0=I0)  # tnu takes GHz
     model_norm = normfac * model_intensity / unitfactor[unit]
-    return model_norm
+    return model_norm.to(u.mJy)
 
 
 #def inorm(em,nu=freq[1],nu0=freq[0],intens0=flux[0],Te=8500):
@@ -114,60 +147,111 @@ def inufit(nu, em, normfac, Te=8500, unit='mJy', frequnit='GHz'):
 #    model_norm = intens0/model_intensity0 * model_intensity
 #    return model_norm
 
-def inufit_dust(nu, em, normfac, alpha, normfac2, Te=8500):
+def inufit_dust(nu, em, normfac, alpha, normfac2, Te=default_te):
     """
     inufit with dust added
+
+    Dust spectral index is given by alpha
     """
+
+    nu = with_unit(nu, u.GHz)
+    em = with_unit(em, emu)
+    Te = with_unit(Te, u.K)
+
+    I0 = 2 * constants.k_B * Te * nu[0]**2 / constants.c**2
+    model_intensity = Inu(nu, tnu(Te,nu,em), Te, I0=I0)
+    model_norm = (normfac * model_intensity + normfac2 * model_intensity.unit *
+                  (nu/u.GHz)**alpha)
+    return model_norm.to(u.mJy)
+
+def inufit_dustT(nu, em, normfac, beta, normfac2, dustT, Te=default_te):
+    """
+    Parameters
+    ----------
+    nu : frequency
+    """
+
+    nu = with_unit(nu, u.GHz)
+    em = with_unit(em, emu)
+    Te = with_unit(Te, u.K)
+
     I0 = 2 * constants.k_B * Te * nu[0]**2 / constants.c**2
     model_intensity = Inu(nu,tnu(Te,nu,em),Te,I0=I0)
-    model_norm = normfac * model_intensity + normfac2*nu**alpha
+    #dustem = (2*constants.h*(nu)**(3+beta) / constants.c**2 *
+    #          (np.exp(constants.h*nu*1e9/(constants.k_B*np.abs(dustT))) -
+    #           1)**-1)
+    dustem = dust.blackbody.modified_blackbody(nu=nu,
+                                               temperature=dustT,
+                                               beta=beta) * u.sr
+    print(model_intensity.decompose())
+    print(dustem.decompose())
+    model_norm = normfac * model_intensity + normfac2*dustem
     return model_norm
 
-def inufit_dustT(nu, em, normfac, beta, normfac2, dustT, Te=8500):
-    I0 = 2 * constants.k_B * Te * nu[0]**2 / constants.c**2
-    model_intensity = Inu(nu,tnu(Te,nu,em),Te,I0=I0)
-    dustem = 2*constants.h*(nu)**(3+beta) / constants.c**2 * (np.exp(constants.h*nu*1e9/(constants.k_B*np.abs(dustT))) - 1)**-1
-    model_norm = normfac * model_intensity + normfac2/np.abs(dustT)*dustem
-    return model_norm
 
-
-def mpfitfun(freq,flux,err=None,dust=False,dustT=False):
+def mpfitfun(freq, flux, err=None, dust=False, dustT=False):
     """ wrapper around inufit to be passed into mpfit """
+
+    flux = with_unit(flux, u.Jy)
+    freq = with_unit(freq, u.GHz)
+    if err is not None:
+        err = with_unit(err, flux.unit)
+
     if dust:
         if err is None:
-            def f(p,fjac=None): return [0,(flux-inufit_dust(freq,*p))]
+            def f(p,fjac=None): return [0,(flux-inufit_dust(freq,*p).to(u.Jy))]
         else:
-            def f(p,fjac=None): return [0,(flux-inufit_dust(freq,*p))/err]
+            def f(p,fjac=None): return [0,(flux-inufit_dust(freq,*p).to(u.Jy))/err]
         return f
     elif dustT:
         if err is None:
-            def f(p,fjac=None): return [0,(flux-inufit_dustT(freq,*p))]
+            def f(p,fjac=None): return [0,(flux-inufit_dustT(freq,*p).to(u.Jy))]
         else:
-            def f(p,fjac=None): return [0,(flux-inufit_dustT(freq,*p))/err]
+            def f(p,fjac=None): return [0,(flux-inufit_dustT(freq,*p).to(u.Jy))/err]
         return f
     else:
         if err is None:
-            def f(p,fjac=None): return [0,(flux-inufit(freq,*p))]
+            def f(p,fjac=None): return [0,(flux-inufit(freq,*p).to(u.Jy))]
         else:
-            def f(p,fjac=None): return [0,(flux-inufit(freq,*p))/err]
+            def f(p,fjac=None): return [0,(flux-inufit(freq,*p).to(u.Jy))/err]
         return f
 
-def emtau(freq, flux, err=None, EMguess=1e7, Te=8500, normfac=5e-6, quiet=1):
+def emtau(freq, flux, err=None, EMguess=1e7*emu, Te=default_te, normfac=5e-6,
+          quiet=1, dust=False, dustT=False, alpha=3.5, normfac2=1e-6,
+          beta=1.75, **kwargs):
     """
     Returns emission measure & optical depth given radio continuum data points
     at frequency freq with flux density flux.
 
     return bestEM,nu(tau=1),chi^2
     """
-    mp = mpfit(mpfitfun(freq,flux,err),xall=[EMguess,normfac],quiet=quiet)
+    EMguess = with_unit(EMguess, emu)
+    Te = with_unit(Te, u.K)
+    flux = with_unit(flux, u.Jy)
+    err = with_unit(err, u.Jy)
+
+    ok = np.isfinite(freq) & np.isfinite(flux) & np.isfinite(err)
+
+    guesses = [(EMguess/emu).decompose(), normfac]
+    if dust:
+        guesses += [alpha, normfac2]
+    elif dustT:
+        guesses += [beta, normfac2, dustT]
+
+    mp = mpfit.mpfit(mpfitfun(freq[ok], flux[ok], err[ok], dust=dust,
+                              dustT=bool(dustT)),
+                     xall=guesses,
+                     quiet=quiet)
     mpp = mp.params
     mpperr = mp.perror
     chi2 = mp.fnorm
     bestEM = mpp[0]
     normfac = mpp[1]
-    nu_tau = (Te**1.35 / bestEM / 8.235e-2)**(-1/2.1)
 
-    return bestEM,nu_tau,normfac,chi2
+    # bestEM is unitless w/ emu units
+    nu_tau = (((Te/u.K)**1.35 / (bestEM) / 8.235e-2)**(-1/2.1)).decompose()
+
+    return with_unit(bestEM, emu), nu_tau, normfac, chi2, mp
 
 class HIIregion(object):
     """
@@ -176,47 +260,63 @@ class HIIregion(object):
     """
 
     def __init__(self, nu, flux, fluxerr, fluxunit='mJy', frequnit='GHz',
-                 beamsize_as2=0.25, dist_kpc=1.0, resolved=False, Te=8500,
-                 **kwargs):
+                 beamsize_as2=0.25*u.arcsec**2, dist_kpc=1.0*u.kpc, resolved=False,
+                 Te=default_te, **kwargs):
         order = np.argsort(np.asarray(nu))
-        self.nu           = np.asarray(nu)[order]
-        self.flux         = np.asarray(flux)[order]
-        self.fluxerr      = np.asarray(fluxerr)[order]
-        self.frequnit     = frequnit
-        self.fluxunit     = fluxunit
+        self.frequnit     = u.Unit(frequnit)
+        self.fluxunit     = u.Unit(fluxunit)
+        self.nu           = with_unit(np.asarray(nu)[order], self.frequnit)
+        self.flux         = with_unit(np.asarray(flux)[order], self.fluxunit)
+        self.fluxerr      = with_unit(np.asarray(fluxerr)[order], self.fluxunit)
         self.beamsize_as2 = beamsize_as2
         self.dist_kpc = dist_kpc
         self.resolved = resolved
         self.Te = Te
-        self.em, self.nutau, self.normfac, self.chi2 = emtau(self.nu,
+        self.em, self.nutau, self.normfac, self.chi2, self.mp = emtau(self.nu,
                                                              self.flux,
                                                              self.fluxerr,
                                                              Te=self.Te,
                                                              **kwargs)
 
-    def refit(self,**kwargs):
+    def refit(self, **kwargs):
         """ refit, presumably using different inputs to emtau """
-        self.em,self.nutau,self.normfac,self.chi2 = emtau(self.nu,self.flux,self.fluxerr,Te=self.Te,**kwargs)
+        self.em, self.nutau, self.normfac, self.chi2, self.mp = emtau(self.nu,
+                                                             self.flux,
+                                                             self.fluxerr,
+                                                             Te=self.Te,
+                                                             **kwargs)
 
-    def loglogplot(self,numin=1.0*u.GHz,numax=10.0*u.GHz,plottitle='',do_annotations=True,**kwargs):
-        x = np.linspace(numin,numax,500)
-        y = inufit(x,self.em,self.normfac)
-        pl.loglog(x,y)
+    def loglogplot(self, numin=1.0*u.GHz, numax=10.0*u.GHz, plottitle='',
+                   do_annotations=True, dust=False, **kwargs):
+        import pylab as pl
+        x = np.logspace(np.log10(numin.to(u.GHz).value),
+                        np.log10(numax.to(u.GHz).value),
+                        500)
+
+        if dust:
+            y = inufit_dust(x, self.em, self.normfac, self.mp.params[2],
+                            self.mp.params[3]).to(u.mJy)
+        else:
+            y = inufit(x, self.em, self.normfac).to(u.mJy)
+
+        pl.loglog(x, y)
         pl.xlabel('Frequency (GHz)')
         pl.ylabel('Flux Density (mJy)')
         pl.title(plottitle)
 
-        pl.errorbar(self.nu,self.flux,yerr=self.fluxerr,fmt=',',**kwargs)
+        pl.errorbar(self.nu.value, self.flux.to(u.mJy).value,
+                    yerr=self.fluxerr.to(u.mJy).value,
+                    fmt=',', **kwargs)
 
         self.physprops()
         if do_annotations:
-            pl.annotate("size (as): %0.2g" % (self.srcsize/au), [.8, .3],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("size (au): %0.2g" % (self.srcsize/au), [.8, .3],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("mass (msun): %0.2g" % self.mass, [.8, .25],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("EM: %0.2g" % self.em, [.8, .2],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("Nu(Tau=1): %0.2g" % self.nutau, [.8, .15],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("N(lyc): %0.2g" % self.Nlyc, [.8,.1],textcoords='axes fraction',xycoords='axes fraction')
-            pl.annotate("dens: %0.2g" % self.dens, [.8,.05],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("size (as): {0:0.2g}".format(self.srcsize), [.8, .3],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("size (au): {0:0.2g}".format(self.srcsize), [.8, .3],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("mass (msun): {0:0.2g}".format(self.mass), [.8, .25],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("EM: {0:0.2g}".format(self.em), [.8, .2],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("Nu(Tau=1): {0:0.2g}".format(self.nutau), [.8, .15],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("N(lyc): {0:0.2g}".format(self.Nlyc), [.8,.1],textcoords='axes fraction',xycoords='axes fraction')
+            pl.annotate("dens: {0:0.2g}".format(self.dens), [.8,.05],textcoords='axes fraction',xycoords='axes fraction')
 
     def physprops(self):
         """
@@ -228,18 +328,30 @@ class HIIregion(object):
         ERROR IN CURRENT VERSION
         """
         if self.resolved:
-            self.srcsize = self.beamsize_as2 * (self.dist_kpc*1000.0*au)**2
+            self.srcsize = ((self.beamsize_as2 *
+                             (self.dist_kpc.to(u.au))**2)**0.5).to(u.au,
+                                                                   u.dimensionless_angles())
         else:
-            self.srcsize = np.sqrt(self.flux[0]*unitfactor[self.fluxunit]/(2*constants.k_B*self.Te)
-                                   * (constants.c/(self.nu[0]*freqfactor[self.frequnit]))**2
-                                   * (self.dist_kpc*1e3*u.pc)**2 / np.pi)
-        self.dens = np.sqrt(self.em/(self.srcsize))
-        self.mass = self.dens * 4.0/3.0 * np.pi * self.srcsize**3 * muh * constants.m_p / u.Msun
+            self.srcsize = np.sqrt(self.flux[0] /
+                                   (2*constants.k_B*self.Te)
+                                   * (constants.c /
+                                      (self.nu[0]))**2
+                                   * (self.dist_kpc)**2 / np.pi).to(u.au)
+        self.dens = np.sqrt(self.em/(self.srcsize)).to(u.cm**-3)
+        self.mass = (self.dens * 4.0/3.0 * np.pi * self.srcsize**3 * muh *
+                     constants.m_p).to(u.M_sun)
 
+        # I think this is a solution to the Stromgren equation with... some....
+        # questionable values?
         U = self.dens**(2/3.) * self.srcsize/u.pc
-        self.Nlyc = 8.04e46*self.Te**-.85 * U**3
+        self.Nlyc = (8.04e46*(self.Te/u.K)**-.85 * (U/u.cm**-3)**3).decompose()
 
-        return self.srcsize/u.au,self.dens,self.mass,self.Nlyc,self.em,self.nutau
+        return {'srcsize': self.srcsize,
+                'density': self.dens,
+                'mass': self.mass,
+                'Nlyc': self.Nlyc,
+                'EM': self.em,
+                'nutau': self.nutau}
 
 
 
@@ -296,7 +408,7 @@ def EM_of_T(TB, Te=default_te, nu=default_freq):
     " eqn 4.61 of Condon & Ransom inverted "
     return (-3.05e6 * (Te/(1e4*u.K))**1.35 * (nu/u.GHz)**2.1 * np.log(1-TB/Te)
             * u.cm**-6 * u.pc)
-    
+
 def qlyc_of_tb(TB, Te=default_te, nu=default_freq, radius=1*u.pc):
     EM = EM_of_T(TB, Te=Te, nu=nu)
     result = (4/3. * np.pi * radius**3 * alpha_b * EM / radius)
