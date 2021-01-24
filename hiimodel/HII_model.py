@@ -58,6 +58,8 @@ emu = u.cm**-6*u.pc
 
 def tnu(Te, nu, EM):
     """
+    Optical Depth for a given electron temperature, frequency, and emission
+    measure
 
     Parameters
     ----------
@@ -97,6 +99,16 @@ def tnu(Te, nu, EM):
     #tau = 8.235e-2 * Te**-1.35 * nu**-2.1 * EM
     return tau
 
+def tau(nu, EM, Te=default_te):
+    """
+    Another equation for optical depth, less explicit.
+    This is some approximation from Rohlfs & Wilson, but the above is probably
+    better to use.
+    """
+    return (3.28e-7 * (Te/(1e4*u.K))**-1.35 * (nu/u.GHz)**-2.1 *
+            (EM/(u.cm**-6*u.pc)))
+
+
 def Inu(nu, tau, Te, I0=0):
     """
     Calculates flux for a given optical depth, frequency, and temperature
@@ -124,10 +136,10 @@ def Inu(nu, tau, Te, I0=0):
         taufactor = tau
         """ assumes I0 is set"""
     I0 = 2 * constants.k_B * Te * nutau1**2 / constants.c**2 * taufactor
-    #thin = (tau < 1) * np.exp(1-tau) * I0
-    #thick = 2 * constants.k_B * Te * (nu * (tau > 1))**2 / constants.c**2
-    return I0 * np.exp(1-tau)
-    #return thin+thick
+    thin = (tau < 1) * np.exp(1-tau) * I0
+    thick = 2 * constants.k_B * Te * (nu * (tau > 1))**2 / constants.c**2
+    #return I0 * np.exp(1-tau) # WRONG.
+    return thin+thick
 
 @custom_model
 def inufit(nu, em=1e7, normfac=1e-10, Te=default_te.value, nu0=1.5):
@@ -148,7 +160,8 @@ def inufit(nu, em=1e7, normfac=1e-10, Te=default_te.value, nu0=1.5):
     Te = with_unit(Te, u.K)
 
     I0 = 2 * constants.k_B * Te * nu0**2 / constants.c**2
-    model_intensity = Inu(nu, tnu(Te, nu, em),Te,I0=I0)  # tnu takes GHz
+    tau = tnu(Te, nu, em)  # tnu takes GHz
+    model_intensity = Inu(nu, tau, Te, I0=I0)
     model_norm = normfac * model_intensity
     return model_norm.to(u.mJy).value
 
@@ -279,7 +292,7 @@ def emtau(freq, flux, err=None, EMguess=1e7*emu, Te=default_te, normfac=5e-6,
         m_init.em.min = 1 # cannot be less than 1 cm^-6 pc
         m_init.normfac.min = 0
         if hasattr(m_init, 'beta'):
-            m_init.beta.min = 0
+            m_init.beta.min = 1
             m_init.beta.max = 10
             m_init.normfac2.min = 0
         elif hasattr(m_init, 'alpha'):
@@ -343,8 +356,10 @@ class HIIregion(object):
         if 'dustT' in kwargs and kwargs['dustT']:
             self.beta = self.params[2]
             self.dustT = self.params[4]
+            self.normfac2 = self.params[3]
         elif 'dust' in kwargs and kwargs['dust']:
             self.alpha = self.params[2]
+            self.normfac2 = self.params[3]
 
 
     def loglogplot(self, numin=1.0*u.GHz, numax=10.0*u.GHz, plottitle='',
@@ -375,16 +390,17 @@ class HIIregion(object):
 
         pl.errorbar(self.nu.value, self.flux.to(u.mJy).value,
                     yerr=self.fluxerr.to(u.mJy).value,
-                    fmt=',', **kwargs)
+                    zorder=10,
+                    fmt='s', markersize=3, alpha=0.75, **kwargs)
 
         self.physprops()
         if do_annotations:
             #pl.annotate("size (as): {0:0.2g}".format(self.srcsize), [annotation_xpos, .35],textcoords='axes fraction',xycoords='axes fraction')
             if hasattr(self, 'beta'):
-                pl.annotate("$\\beta$: {0:0.2g}".format(self.beta), [annotation_xpos, .4],textcoords='axes fraction',xycoords='axes fraction')
+                pl.annotate("$\\beta$: {0:0.3g}".format(self.beta), [annotation_xpos, .4],textcoords='axes fraction',xycoords='axes fraction')
                 pl.annotate("$T_{{dust}}$: {0:0.2g} K".format(self.dustT), [annotation_xpos, .35],textcoords='axes fraction',xycoords='axes fraction')
             elif hasattr(self, 'alpha'):
-                pl.annotate("$\\alpha$: {0:0.2g}".format(self.alpha), [annotation_xpos, .35],textcoords='axes fraction',xycoords='axes fraction')
+                pl.annotate("$\\alpha$: {0:0.3g}".format(self.alpha), [annotation_xpos, .35],textcoords='axes fraction',xycoords='axes fraction')
 
             pl.annotate("size (au): {0.value:0.2g}{0.unit:latex}".format(self.srcsize), [annotation_xpos, .3],textcoords='axes fraction',xycoords='axes fraction')
             pl.annotate("mass (msun): {0.value:0.2g}{0.unit:latex}".format(self.mass), [annotation_xpos, .25],textcoords='axes fraction',xycoords='axes fraction')
@@ -407,10 +423,13 @@ class HIIregion(object):
                              (self.dist_kpc.to(u.au))**2)**0.5).to(u.au,
                                                                    u.dimensionless_angles())
         else:
-            self.srcsize = np.sqrt(self.flux[0] /
+
+            flux_to_use = np.argmax(np.isfinite(self.flux))
+
+            self.srcsize = np.sqrt(self.flux[flux_to_use] /
                                    (2*constants.k_B*self.Te)
                                    * (constants.c /
-                                      (self.nu[0]))**2
+                                      (self.nu[flux_to_use]))**2
                                    * (self.dist_kpc)**2 / np.pi).to(u.au)
         self.dens = np.sqrt(self.em/(self.srcsize)).to(u.cm**-3)
         self.mass = (self.dens * 4.0/3.0 * np.pi * self.srcsize**3 * muh *
@@ -449,10 +468,6 @@ def dens(Qlyc=1e45*u.s**-1, R=0.1*u.pc, alpha_b=alpha_b):
 def EM(Qlyc=1e45*u.s**-1, R=0.1*u.pc, alpha_b=alpha_b):
     return (R * (((3 * Qlyc)/(4 * np.pi * R**3 *
                               alpha_b))**0.5)**2).to(u.cm**-6*u.pc)
-
-def tau(nu, EM, Te=default_te):
-    return (3.28e-7 * (Te/(1e4*u.K))**-1.35 * (nu/u.GHz)**-2.1 *
-            (EM/(u.cm**-6*u.pc)))
 
 def Tb(Te=default_te, nu=95*u.GHz, EM=EM()):
     return Te * (1-np.exp(-tau(nu=nu, EM=EM, Te=Te)))
